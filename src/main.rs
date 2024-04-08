@@ -1,15 +1,22 @@
+use futures::future::{BoxFuture, FutureExt};
+use logic_ext::Direction;
+use rand::Rng;
+use std::collections::BTreeMap;
+use std::io::BufRead;
 use std::io::{BufReader, Write};
 use std::process::{Command, ExitStatus};
 use std::time::Instant;
-use std::{fs::OpenOptions, path::PathBuf};use std::io::BufRead;
+use std::{fs::OpenOptions, path::PathBuf};
 
+use expression::Expression;
 use serde::Serialize;
 
-use crate::expression::{Direction, Move};
+use crate::expression::{Move};
 
 mod expression;
+mod logic_ext;
 
-fn generate_bot<Rng: rand::Rng>(rng: &mut Rng) -> String {
+fn generate_bot<Rng: rand::Rng>(rng: &mut Rng) -> Bot {
     let mut expression = expression::Expression {
         kind: expression::ExpressionKind::ConstantMove(Move::Attack(Direction::South)),
     };
@@ -17,69 +24,124 @@ fn generate_bot<Rng: rand::Rng>(rng: &mut Rng) -> String {
         expression.mutate(rng);
     }
 
-    let code = format!("inline:Python;{}",format!(include_str!("./robot_template.py"), expression));
-
-    return code;
+    return Bot {
+        logic: expression.simplify(),
+        species: Species(rng.next_u64() as usize),
+        wins: 0,
+    };
 }
 
-fn main() {
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Species(usize);
+
+#[derive(Debug, Clone)]
+struct Bot {
+    logic: Expression,
+    species: Species,
+    wins: usize,
+}
+
+fn run_batch<'a>(bots: &'a mut [Bot], iterations: usize) -> BoxFuture<'a, ()> {
+    async move {
+        if bots.len() == 0 {
+            return;
+        }
+
+        for bot in bots.iter_mut() {
+            bot.wins *= 3;
+        }
+
+        for i in 0..bots.len() {
+            let bot_a_index = i;
+            let bot_b_index = (i + 1) % bots.len();
+
+            let bot_a = bots[bot_a_index].logic.clone();
+            let bot_b = bots[bot_b_index].logic.clone();
+
+            let mut runners = BTreeMap::new();
+            runners.insert(logic::Team::Blue, Ok(bot_a));
+            runners.insert(logic::Team::Red, Ok(bot_b));
+
+            let result = logic::run(
+                runners,
+                |_| (),
+                100,
+                true,
+                None,
+                logic::GameMode::Normal,
+                None,
+            )
+            .await;
+
+            match result.winner {
+                None => {
+                    // bots[bot_a_index].wins += 1;
+                    // bots[bot_b_index].wins += 1
+                }
+                Some(logic::Team::Blue) => {
+                    bots[bot_a_index].wins += 1;
+                }
+                Some(logic::Team::Red) => {
+                    bots[bot_b_index].wins += 1;
+                }
+            }
+        }
+
+        bots.sort_by_key(|t| t.wins);
+
+        println!("\tbest bot wins: {}", bots[bots.len() - 1].wins);
+
+        if iterations > 1 {
+            let winners_end = bots.partition_point(|k| k.wins % 3 == 0);
+            let tiers_end = bots.partition_point(|k| k.wins % 3 != 2);
+
+            run_batch(&mut bots[0..winners_end], iterations - 1).await;
+            run_batch(&mut bots[winners_end..tiers_end], iterations - 1).await;
+            run_batch(&mut bots[tiers_end..], iterations - 1).await;
+        }
+    }
+    .boxed()
+}
+
+#[tokio::main]
+async fn main() {
     // println!("{:?}", std::fs::read_dir(".").unwrap().collect::<Vec<_>>());
     let mut rng = rand::thread_rng();
 
-    let bots = (0..100).map(|_|generate_bot(&mut rng)).collect::<Vec<_>>();
+    let mut bots = (0..100).map(|_| generate_bot(&mut rng)).collect::<Vec<_>>();
 
-    let mut specs = Vec::with_capacity(100);
-    let global_start_time = Instant::now();
+    for i in 0..25 {
+        for bot in bots.iter_mut() {
+            bot.wins = 0;
+        }
 
-    for i in 0..bots.len() {
-        let bot_a = bots[i].clone();
-        let bot_b = bots[(i+1)%bots.len()].clone();
+        let global_start_time = Instant::now();
 
-        specs.push(
-            GameSpec {
-                red: bot_a,
-                blue: bot_b,
-                seed: None
-            }
+        run_batch(&mut bots[..], 4).await;
+
+        println!("\tWins: {:?}", bots[bots.len() - 1].wins);
+        println!("\tWins: {:?}", bots[bots.len() - 1].species);
+        println!("\tWins: {}", bots[bots.len() - 1].logic);
+
+        let global_end_time = Instant::now();
+        println!(
+            "Iteration {i} took {:?}",
+            global_end_time - global_start_time
         );
 
-        if specs.len() >= 99 {
-            let start_time = Instant::now();        
-            let mut child = Command::new("../robot-rumble/cli/target/debug/rumblebot")
-            .args(["run", "batch"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        bots.reverse();
+        bots.truncate(bots.len() / 4);
 
-            let mut process_stdin = child.stdin.as_ref().unwrap();
-            let mut process_stdout = BufReader::new(child.stdout.as_mut().unwrap()).lines();
-            for spec in &specs {
-                writeln!(process_stdin, "{}", serde_json::to_string(&spec).unwrap()).unwrap();
-
-                let line = match  process_stdout.next() {
-                    None => panic!("Line expected"),
-                    Some(Err(t)) => panic!("{t:?}"),
-                    Some(Ok(line)) => line
-                };
-
-            println!("{i}\t{:?}\t{line}", Instant::now() - global_start_time);
-                
+        while bots.len() < 100 {
+            let mut bot_copy = bots[rng.gen_range(0..bots.len())].clone();
+            bot_copy.wins = 0;
+            for _ in 0..25 {
+                bot_copy.logic.mutate(&mut rng)
             }
-
-            let out = child.wait().unwrap();
-
-
-            let end_time = Instant::now();
-            // let output = std::str::from_utf8(&out.stdout).unwrap().replace("\n", "\n    ");
-            // if output.contains("tie") {
-            //     continue;
-            // }
-
-            specs.clear();
+            bot_copy.logic = bot_copy.logic.simplify().simplify().simplify();
+            bots.push(bot_copy);
         }
     }
-
 
     // println!("{:?}", std::fs::read_dir("..").unwrap().collect::<Vec<_>>());
     // println!(
@@ -90,10 +152,9 @@ fn main() {
     // );
 }
 
-
 #[derive(Serialize)]
 struct GameSpec {
     red: String,
     blue: String,
-    seed: Option<String>
+    seed: Option<String>,
 }
