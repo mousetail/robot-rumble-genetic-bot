@@ -1,5 +1,5 @@
 use futures::future::{BoxFuture, FutureExt};
-use logic::{MainOutput, ObjDetails, RobotRunner, Team, Terrain, Unit};
+use logic::{MainOutput, ObjDetails, RobotRunner, Team, Unit};
 use logic_ext::Direction;
 use rand::prelude::SliceRandom;
 use rand::Rng;
@@ -12,7 +12,7 @@ use std::fs::OpenOptions;
 use std::time::Instant;
 
 use expression::Expression;
-use serde::{Deserialize, Serialize};
+use serde::{Serialize};
 
 use crate::expression::Move;
 
