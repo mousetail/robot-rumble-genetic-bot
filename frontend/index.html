@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <style>
+            body {
+                font-family: sans-serif;
+            }
+
+            *, *:before, *:after {
+                box-sizing: border-box;
+            }
+        </style>
+    </head>
+    <body>
+        <table style="table-layout: fixed; width: 100%">
+            <tr>
+                <td style="width: 11rem">Round Number</td>
+                <td><code id="round-number"></code></td>
+            </tr>
+            <tr>
+                <td>Best Bot Species:</td>
+                <td><code id="best-bot-species"></code></td>
+            </tr>
+            <tr>
+                <td>Best Bot Generation</td>
+                <td><code id="best-bot-generation"></code></td>
+            </tr>
+            <tr>
+                <td>Best Bot Parents:</td>
+                <td colspan="3"><code id="best-bot-parents"></code></td>
+            </tr>
+            <tr>
+                <td>Best Bot Score:</td>
+                <td><code id="best-bot-wins"></code> Wins</td>
+                <td><code id="best-bot-friendly-units"></code> Friendly Units</td>
+                <td><code id="best-bot-enemy-units"></code> Enemy Units</td>
+                <td><code id="best-bot-friendly-health"></code> Friendly Health</td>
+                <td><code id="best-bot-enemy-health"></code> Enemy Health</td>
+            </tr>
+            <tr>
+                <td>Best Bot Logic:</td>
+                <td colspan="5">
+                    <canvas id="graph-canvas" style="width: 100%"></canvas>
+                    <pre id="best-bot-logic"></pre>
+                </td>
+            </tr>
+            <tr>
+                <td>Species</td>
+                <td id="species" colspan="5">
+
+                </td>
+            </tr>
+        <pre id="content"></pre>
+        </table>
+
+        <script>
+            "use strict"
+            let ws = new WebSocket('ws://localhost:8080');
+
+            window.setInterval(()=>ws.send(""), 4000);
+
+            let best_bot_species_box = document.getElementById('best-bot-species');
+            let round_number_box = document.getElementById('round-number');
+            let best_bot_generation_box = document.getElementById('best-bot-generation');
+            let parents_box = document.getElementById('best-bot-parents');
+            let score_box = document.getElementById('best-bot-score');
+            let logic_box = document.getElementById('best-bot-logic');
+            let best_bot_wins_box = document.getElementById('best-bot-wins');
+
+            let best_bot_units_box = document.getElementById('best-bot-friendly-units');
+            let best_bot_enemy_units_box = document.getElementById('best-bot-enemy-units');
+            let best_bot_health_box = document.getElementById('best-bot-friendly-health');
+            let best_bot_enemy_health_box = document.getElementById('best-bot-enemy-health');
+
+            const species_box = document.getElementById('species');
+
+
+            let canvas = document.getElementById('graph-canvas');
+
+            const zip = (a, b) => a.map((k, i) => [k, b[i]]);
+            const gradient = [
+                [0x00,0x00,0x00],
+                [0x4b,0x00,0x82],
+                [0x22,0x8b,0x22],
+                [0xda,0xa5,0x20],
+                [0xff,0xa5,0x00],
+            ]
+
+            function lerpColors(color1, color2, amount) {
+                return zip(color1, color2).map(([a,b])=>b*amount + a*(1-amount))
+            }
+
+            function getColor(amount) {
+                let value = Math.floor(amount * (gradient.length-1));
+                let offset = amount * (gradient.length-1) % 1;
+                let color = lerpColors(gradient[value], gradient[value+1], offset);
+                return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+            }
+
+            function getDepth(logic) {
+                let children = getChildren(logic);
+                if (children.length === 0) {
+                    return 1
+                }
+                return Math.max(...children.map(getDepth)) + 1
+            }
+
+            function getChildren(logic) {
+                if (typeof logic.kind == "string" || typeof logic.kind =="number") {
+                    return [];
+                }
+                return Object.values(logic.kind).flatMap(Object.values).filter(t=>t!=undefined && t.kind!=undefined);
+            }
+
+            function getName(logic) {
+                if (typeof logic.kind == "string" || typeof logic.kind == "number") {
+                    return "" + logic.kind;
+                }
+                else if (getChildren(logic).length === 0) {
+                    return JSON.stringify(Object.values(logic.kind)[0]);
+                }
+                else {
+                    return Object.keys(logic.kind)[0];
+                }
+            }
+
+            function drawGraph(logic) {
+                let depth = getDepth(logic);
+                console.log(depth);
+                canvas.width = canvas.getBoundingClientRect().width;
+                canvas.height = depth * 50;
+                const context = canvas.getContext('2d');
+                let generation = [logic];
+                let y = 0;
+                let max_uses = 0;
+
+                context.textAlign = 'center';
+
+                function getPosition(index, total) {
+                    return canvas.width * (index+1)/(total + 1);
+                }
+
+                let parents = [];
+
+                while (generation.length > 0) {
+                    let next_generation = [];
+                    let next_parents = [];
+
+                    for (let i=0; i<generation.length; i++) {
+                        max_uses = Math.max(max_uses, generation[i].times_used);
+
+                        context.strokeStyle = generation[i].times_used == max_uses ? 'red' :
+                        generation[i].times_used > 0 ? getColor(generation[i].times_used / max_uses) : '#aaa';
+                        context.lineWidth = 3;
+
+                        if (parents.length > i) {
+                            context.beginPath();
+                            context.moveTo(parents[i], y-20);
+                            context.bezierCurveTo(parents[i], y-15, getPosition(i, generation.length), y-5, getPosition(i, generation.length), y+5);
+                            //context.lineTo(getPosition(i, generation.length), y+5);
+                            context.stroke();
+                        }
+
+                        context.strokeRect(
+                            getPosition(i, generation.length) - 50,
+                            y+5,
+                            100,
+                            25
+                        )
+                        context.fillText(getName(generation[i]), getPosition(i, generation.length), y+20);
+                        // context.fillText(generation[i].times_used, getPosition(i, generation.length), y+30);
+
+                        const children = getChildren(generation[i]);
+                        next_generation.push(...children);
+                        next_parents.push(...children.map(_=>getPosition(i,generation.length)));
+                    }
+                    y+=50;
+                    generation = next_generation;
+                    parents = next_parents;
+                }
+
+            }
+
+            ws.addEventListener('message', (ev)=>{
+                const data = JSON.parse(ev.data);
+
+                round_number_box.textContent = data.iteration_number;
+                best_bot_species_box.textContent = data.best_bot.species;
+                best_bot_generation_box.textContent = data.best_bot.generation;
+                parents_box.textContent = JSON.stringify(data.best_bot.parents);
+                drawGraph(data.best_bot.logic);
+
+                const {wins, friendly_units, enemy_units, friendly_health, enemy_health} = data.best_bot.score;
+                best_bot_wins_box.textContent = wins.join(', ');
+                best_bot_units_box.textContent = friendly_units;
+                best_bot_enemy_units_box.textContent = enemy_units;
+                best_bot_health_box.textContent = friendly_health;
+                best_bot_enemy_health_box.textContent = enemy_health;
+
+                species_box.replaceChildren(...data.species.map(([name, score])=>{
+                    let div = document.createElement('div');
+                    div.textContent = name + ' (' + Object.entries(score).map(([a,b])=>a+': '+b).join(', ')+')';
+                    return div;
+                }))
+            })
+        </script>
+    </body>
+</html>

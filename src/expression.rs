@@ -2,13 +2,17 @@ use std::collections::BTreeMap;
 
 use logic::{ActionType, Coords, Id, ObjDetails, RobotRunner, Team, Unit};
 use rand::seq::SliceRandom;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::logic_ext::CoordsExt;
 use crate::logic_ext::Direction;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Expression {
     pub kind: ExpressionKind,
+    #[serde(skip_deserializing)]
+    pub times_used: usize,
 }
 
 impl std::fmt::Display for Expression {
@@ -18,17 +22,19 @@ impl std::fmt::Display for Expression {
 }
 
 impl Expression {
-    pub fn mutate<RAND: rand::Rng>(&mut self, rng: &mut RAND) {
-        self.kind.mutate(rng)
+    pub fn mutate<RAND: rand::Rng>(&mut self, rng: &mut RAND, ignore_sanity_checks: bool) {
+        self.kind.mutate(rng, self.times_used, ignore_sanity_checks)
     }
 
-    pub fn eval(&self, input: &logic::ProgramInput, id: Id, unit: &Unit) -> Result<Value, ()> {
+    pub fn eval(&mut self, input: &logic::ProgramInput, id: Id, unit: &Unit) -> Result<Value, ()> {
+        self.times_used += 1;
         self.kind.eval(input, id, unit)
     }
 
     pub fn simplify(self) -> Expression {
         Expression {
             kind: self.kind.simplify(),
+            times_used: 0,
         }
     }
 
@@ -37,15 +43,22 @@ impl Expression {
             kind: ExpressionKind::If {
                 condition: Box::new(Expression {
                     kind: ExpressionKind::generate_boolean_expression(rng),
+                    times_used: 0,
                 }),
                 then: Box::new(self),
                 otherwise: Box::new(other),
             },
+            times_used: 0,
         };
+    }
+
+    pub fn clear_times_used(&mut self) {
+        self.times_used = 0;
+        self.kind.clear_times_used();
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExpressionKind {
     If {
         condition: Box<Expression>,
@@ -138,24 +151,19 @@ impl ExpressionKind {
         rng: &mut RAND,
         range: Option<std::ops::Range<i32>>,
     ) -> ExpressionKind {
-        if rng.gen_bool(0.5) {
-            return [
-                ExpressionKind::DistanceToCenter,
-                ExpressionKind::DistanceToNearestAlly,
-                ExpressionKind::DistanceToNearestEnemy,
-            ][rng.gen_range(0..3)]
-            .clone();
+        if let Some(r) = range {
+            return ExpressionKind::ConstantNumber(rng.gen_range(r));
         }
 
         return [
+            ExpressionKind::DistanceToCenter,
+            ExpressionKind::DistanceToNearestAlly,
+            ExpressionKind::DistanceToNearestEnemy,
+            ExpressionKind::AlliedSurroundingTiles,
+            ExpressionKind::EnemySurroundingTiles,
             ExpressionKind::Health,
             ExpressionKind::X,
             ExpressionKind::Y,
-            ExpressionKind::ConstantNumber(
-                range
-                    .map(|d| rng.gen_range(d))
-                    .unwrap_or_else(|| *[0, 1, -1, 5, -5, 10, 17].choose(rng).unwrap()),
-            ),
         ]
         .choose(rng)
         .unwrap()
@@ -165,20 +173,27 @@ impl ExpressionKind {
     fn generate_boolean_expression<RAND: rand::Rng>(rng: &mut RAND) -> ExpressionKind {
         let left = Box::new(Expression {
             kind: Self::generate_integer_expression(rng, None),
+            times_used: 0,
         });
         let right = Box::new(Expression {
             kind: Self::generate_integer_expression(rng, left.kind.get_range()),
+            times_used: 0,
         });
 
-        if rng.gen_bool(0.5) {
+        if rng.gen_bool(0.1) {
             return ExpressionKind::Equals { left, right };
         } else {
             return ExpressionKind::GreaterThan { left, right };
         }
     }
 
-    pub fn mutate<RAND: rand::Rng>(&mut self, rng: &mut RAND) {
-        if rng.gen_bool(0.2) {
+    pub fn mutate<RAND: rand::Rng>(
+        &mut self,
+        rng: &mut RAND,
+        times_used: usize,
+        ignore_sanity_checks: bool,
+    ) {
+        if (ignore_sanity_checks || times_used > 0) && rng.gen_bool(0.2) {
             let right = match self.get_type() {
                 ValueType::Boolean => Self::generate_boolean_expression(rng),
                 ValueType::Number => Self::generate_integer_expression(rng, self.get_range()),
@@ -188,9 +203,18 @@ impl ExpressionKind {
             let condition = Self::generate_boolean_expression(rng);
 
             *self = ExpressionKind::If {
-                then: Box::new(Expression { kind: self.clone() }),
-                otherwise: Box::new(Expression { kind: right }),
-                condition: Box::new(Expression { kind: condition }),
+                then: Box::new(Expression {
+                    kind: self.clone(),
+                    times_used: 0,
+                }),
+                otherwise: Box::new(Expression {
+                    kind: right,
+                    times_used: 0,
+                }),
+                condition: Box::new(Expression {
+                    kind: condition,
+                    times_used: 0,
+                }),
             };
             return;
         }
@@ -199,37 +223,50 @@ impl ExpressionKind {
                 *t += rng.sample(rand::distributions::Uniform::new(-1, 2));
             }
             ExpressionKind::If {
-                condition: _,
+                condition: cond,
                 then,
                 otherwise,
             } => {
-                if rng.gen_bool(0.5) {
-                    then.mutate(rng);
+                if !ignore_sanity_checks
+                    && (then.times_used == 0 || otherwise.times_used == 0)
+                    && rng.gen_bool(0.1)
+                {
+                    *self = if then.times_used == 0 {
+                        otherwise.kind.clone()
+                    } else {
+                        then.kind.clone()
+                    }
+                } else if !ignore_sanity_checks
+                    && (then.times_used == 0 || otherwise.times_used == 0)
+                {
+                    cond.mutate(rng, ignore_sanity_checks)
+                } else if rng.gen_bool(0.5) && then.times_used > 0 {
+                    then.mutate(rng, ignore_sanity_checks);
                 } else {
-                    otherwise.mutate(rng);
+                    otherwise.mutate(rng, ignore_sanity_checks);
                 }
             }
             ExpressionKind::ConstantBoolean(b) => *b = !*b,
             ExpressionKind::ConstantMove(_) => *self = Self::generate_move_expression(rng),
             ExpressionKind::Health => (),
-            ExpressionKind::X => (),
-            ExpressionKind::Y => (),
+            ExpressionKind::X => *self = ExpressionKind::Y,
+            ExpressionKind::Y => *self = ExpressionKind::X,
             ExpressionKind::GreaterThan { left, right } => {
                 if rng.gen_bool(0.5) {
-                    left.mutate(rng)
+                    left.mutate(rng, ignore_sanity_checks)
                 } else {
-                    right.mutate(rng)
+                    right.mutate(rng, ignore_sanity_checks)
                 }
             }
             ExpressionKind::Equals { left, right } => {
                 if rng.gen_bool(0.5) {
-                    left.mutate(rng)
+                    left.mutate(rng, ignore_sanity_checks)
                 } else {
-                    right.mutate(rng)
+                    right.mutate(rng, ignore_sanity_checks)
                 }
             }
-            ExpressionKind::AlliedSurroundingTiles => (),
-            ExpressionKind::EnemySurroundingTiles => (),
+            ExpressionKind::AlliedSurroundingTiles => *self = ExpressionKind::EnemySurroundingTiles,
+            ExpressionKind::EnemySurroundingTiles => *self = ExpressionKind::AlliedSurroundingTiles,
             ExpressionKind::AttackNearestEnemy => {
                 if rng.gen_bool(0.05) {
                     *self = ExpressionKind::MoveToNearestEnemy
@@ -254,7 +291,7 @@ impl ExpressionKind {
         }
     }
 
-    fn eval(&self, input: &logic::ProgramInput, id: Id, unit: &Unit) -> Result<Value, ()> {
+    fn eval(&mut self, input: &logic::ProgramInput, id: Id, unit: &Unit) -> Result<Value, ()> {
         fn get_surrounding_tiles<'a>(
             input: &'a logic::ProgramInput,
             coords: logic::Coords,
@@ -474,6 +511,29 @@ impl ExpressionKind {
         }
     }
 
+    pub fn clear_times_used(&mut self) {
+        match self {
+            ExpressionKind::If {
+                condition,
+                then,
+                otherwise,
+            } => {
+                condition.clear_times_used();
+                then.clear_times_used();
+                otherwise.clear_times_used();
+            }
+            ExpressionKind::Equals { left, right } => {
+                left.clear_times_used();
+                right.clear_times_used();
+            }
+            ExpressionKind::GreaterThan { left, right } => {
+                left.clear_times_used();
+                right.clear_times_used();
+            }
+            _ => (),
+        }
+    }
+
     fn simplify(self) -> ExpressionKind {
         match self {
             ExpressionKind::If {
@@ -482,7 +542,7 @@ impl ExpressionKind {
                 otherwise,
             } => {
                 if then == otherwise {
-                    then.kind
+                    then.kind.simplify()
                 } else {
                     match condition.kind {
                         ExpressionKind::ConstantBoolean(true) => then.kind.simplify(),
@@ -592,7 +652,7 @@ impl core::fmt::Display for ExpressionKind {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Move {
     Attack(Direction),
     Move(Direction),
@@ -645,16 +705,19 @@ impl RobotRunner for Expression {
                             direction: direction.into(),
                         },
                         Move::Move(direction) => logic::Action {
-                            type_: ActionType::Attack,
+                            type_: ActionType::Move,
                             direction: direction.into(),
                         },
                     }),
                     _ => panic!("Expected expression to return an action"),
                 })
-                .map_err(|_k| logic::Error {
-                    summary: format!(""),
-                    details: None,
-                    loc: None,
+                .map_err(|_k| {
+                    eprint!("Bot errored");
+                    logic::Error {
+                        summary: format!(""),
+                        details: None,
+                        loc: None,
+                    }
                 });
             moves.insert(bot, action);
         }
