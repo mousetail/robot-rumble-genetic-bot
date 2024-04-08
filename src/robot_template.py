@@ -36,5 +36,18 @@ def is_terrain(tile, state):
     return (obj:=state.obj_by_coords(tile)) is not None and obj.obj_type == ObjType.Terrain
 
 def robot(state, unit):
+    enemies = state.objs_by_team(state.other_team)
+    closest_enemy = min(enemies,
+        key=lambda e: (
+            e.coords.walking_distance_to(unit.coords),
+            -allies_around_corner(e.coords, state)-friendly_surrounding_tiles(e.coords,state),
+            e.health
+        )
+    )
+    closest_ally = min((i for i in state.objs_by_team(unit.team) if i.id != unit.id),
+        key=lambda e: (e.coords.walking_distance_to(unit.coords), e.health)
+    )
+    direction_to_center = clockwise_direction_towards(unit.coords, Coords(9,9))
+
     move = {}
     return move

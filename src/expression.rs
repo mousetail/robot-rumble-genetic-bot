@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, path::Display, result};
 use logic::{ActionType, Coords, Id, ObjDetails, RobotRunner, Team, Unit};
 use rand::seq::SliceRandom;
 
-use crate::logic_ext::Direction;
 use crate::logic_ext::CoordsExt;
+use crate::logic_ext::Direction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expression {
@@ -30,6 +30,18 @@ impl Expression {
         Expression {
             kind: self.kind.simplify(),
         }
+    }
+
+    pub fn crossover<RNG: rand::Rng>(self, other: Self, rng: &mut RNG) -> Expression {
+        return Expression {
+            kind: ExpressionKind::If {
+                condition: Box::new(Expression {
+                    kind: ExpressionKind::generate_boolean_expression(rng),
+                }),
+                then: Box::new(self),
+                otherwise: Box::new(other),
+            },
+        };
     }
 }
 
@@ -78,10 +90,7 @@ pub enum Value {
 impl ExpressionKind {
     pub fn get_type(&self) -> ValueType {
         match self {
-            ExpressionKind::If {
-                then,
-                ..
-            } => then.kind.get_type(),
+            ExpressionKind::If { then, .. } => then.kind.get_type(),
             ExpressionKind::ConstantNumber(_) => ValueType::Number,
             ExpressionKind::ConstantBoolean(_) => ValueType::Boolean,
             ExpressionKind::ConstantMove(_) => ValueType::Move,
@@ -105,7 +114,8 @@ impl ExpressionKind {
             return [
                 ExpressionKind::AttackNearestEnemy,
                 ExpressionKind::MoveToNearestEnemy,
-            ][rng.gen_range(0..2)].clone()
+            ][rng.gen_range(0..2)]
+            .clone();
         }
 
         let direction = [
@@ -124,20 +134,25 @@ impl ExpressionKind {
         }
     }
 
-    fn generate_integer_expression<RAND: rand::Rng>(rng: &mut RAND) -> ExpressionKind {
+    fn generate_integer_expression<RAND: rand::Rng>(rng: &mut RAND, range: Option<std::ops::Range<i32>>) -> ExpressionKind {
         if rng.gen_bool(0.5) {
             return [
                 ExpressionKind::DistanceToCenter,
                 ExpressionKind::DistanceToNearestAlly,
-                ExpressionKind::DistanceToNearestEnemy
-            ][rng.gen_range(0..3)].clone();
+                ExpressionKind::DistanceToNearestEnemy,
+            ][rng.gen_range(0..3)]
+            .clone();
         }
 
         return [
             ExpressionKind::Health,
             ExpressionKind::X,
             ExpressionKind::Y,
-            ExpressionKind::ConstantNumber(*[0, 1, -1, 5, -5, 10, 17].choose(rng).unwrap()),
+            ExpressionKind::ConstantNumber(
+                range.map(|d|rng.gen_range(d)).unwrap_or_else(||
+                    *[0, 1, -1, 5, -5, 10, 17].choose(rng).unwrap()
+                )
+            ),
         ]
         .choose(rng)
         .unwrap()
@@ -146,10 +161,10 @@ impl ExpressionKind {
 
     fn generate_boolean_expression<RAND: rand::Rng>(rng: &mut RAND) -> ExpressionKind {
         let left = Box::new(Expression {
-            kind: Self::generate_integer_expression(rng),
+            kind: Self::generate_integer_expression(rng, None),
         });
         let right = Box::new(Expression {
-            kind: Self::generate_integer_expression(rng),
+            kind: Self::generate_integer_expression(rng, left.kind.get_range()),
         });
 
         if rng.gen_bool(0.5) {
@@ -163,7 +178,7 @@ impl ExpressionKind {
         if rng.gen_bool(0.2) {
             let right = match self.get_type() {
                 ValueType::Boolean => Self::generate_boolean_expression(rng),
-                ValueType::Number => Self::generate_integer_expression(rng),
+                ValueType::Number => Self::generate_integer_expression(rng, self.get_range()),
                 ValueType::Move => Self::generate_move_expression(rng),
             };
 
@@ -216,44 +231,54 @@ impl ExpressionKind {
                 if rng.gen_bool(0.05) {
                     *self = ExpressionKind::MoveToNearestEnemy
                 }
-            },
+            }
             ExpressionKind::MoveToNearestEnemy => {
                 if rng.gen_bool(0.05) {
                     *self = ExpressionKind::AttackNearestEnemy
                 }
-            },
+            }
             ExpressionKind::DistanceToNearestEnemy => (),
             ExpressionKind::DistanceToNearestAlly => {
                 if rng.gen_bool(0.05) {
                     *self = ExpressionKind::DistanceToCenter
                 }
-            },
+            }
             ExpressionKind::DistanceToCenter => {
                 if rng.gen_bool(0.05) {
                     *self = ExpressionKind::DistanceToNearestAlly
                 }
-            },
+            }
         }
     }
 
     fn eval(&self, input: &logic::ProgramInput, id: Id, unit: &Unit) -> Result<Value, ()> {
-        fn get_surrounding_tiles<'a>(input: &'a logic::ProgramInput, coords: logic::Coords) -> impl Iterator<Item = &'a logic::Obj> {
-            [(0,1),(-1,0),(1,0),(0,-1)].into_iter().flat_map(
-                move |(dx, dy)| input.state.grid.get(&Coords (
-                    coords.0.wrapping_add_signed(dx),
-                    coords.1.wrapping_add_signed(dy)
-                ))
-            ).flat_map(
-                |id| input.state.objs.get(id)
-            )
+        fn get_surrounding_tiles<'a>(
+            input: &'a logic::ProgramInput,
+            coords: logic::Coords,
+        ) -> impl Iterator<Item = &'a logic::Obj> {
+            [(0, 1), (-1, 0), (1, 0), (0, -1)]
+                .into_iter()
+                .flat_map(move |(dx, dy)| {
+                    input.state.grid.get(&Coords(
+                        coords.0.wrapping_add_signed(dx),
+                        coords.1.wrapping_add_signed(dy),
+                    ))
+                })
+                .flat_map(|id| input.state.objs.get(id))
         }
 
-        fn find_nearest_unit_of_team<'a>(input: &'a logic::ProgramInput, coords: Coords, team: Team) -> Option<&'a logic::Obj> {
-            input.state.teams.get(&team)?.iter().flat_map(
-                |d|input.state.objs.get(d)
-            ).min_by_key(
-                |m|m.0.coords.distance(coords)
-            )
+        fn find_nearest_unit_of_team<'a>(
+            input: &'a logic::ProgramInput,
+            coords: Coords,
+            team: Team,
+        ) -> Option<&'a logic::Obj> {
+            input
+                .state
+                .teams
+                .get(&team)?
+                .iter()
+                .flat_map(|d| input.state.objs.get(d))
+                .min_by_key(|m| m.0.coords.distance(coords))
         }
 
         let coords = input.state.objs.get(&id).unwrap().coords();
@@ -295,50 +320,138 @@ impl ExpressionKind {
                 }
             }
             ExpressionKind::AlliedSurroundingTiles => {
-
-                let surrounding_allies = get_surrounding_tiles(input, coords).filter(|t| match t.1 {
-                    ObjDetails::Unit(Unit {team, ..}) => team == input.team,
-                    _ => false
-                }).count();
+                let surrounding_allies = get_surrounding_tiles(input, coords)
+                    .filter(|t| match t.1 {
+                        ObjDetails::Unit(Unit { team, .. }) => team == input.team,
+                        _ => false,
+                    })
+                    .count();
                 return Ok(Value::Number(surrounding_allies as i32));
-            },
+            }
             ExpressionKind::EnemySurroundingTiles => {
-                let surrounding_allies = get_surrounding_tiles(input, coords).filter(|t| match t.1 {
-                    ObjDetails::Unit(Unit {team, ..}) => team != input.team,
-                    _ => false
-                }).count();
+                let surrounding_allies = get_surrounding_tiles(input, coords)
+                    .filter(|t| match t.1 {
+                        ObjDetails::Unit(Unit { team, .. }) => team != input.team,
+                        _ => false,
+                    })
+                    .count();
                 return Ok(Value::Number(surrounding_allies as i32));
-            },
+            }
             ExpressionKind::AttackNearestEnemy => {
-                let nearest_enemy = find_nearest_unit_of_team(input, coords, match input.team {
-                    Team::Red => Team::Blue,
-                    Team::Blue => Team::Red
-                }).map(|k|coords.direction(k.coords())).unwrap_or(Direction::East);
+                let nearest_enemy = find_nearest_unit_of_team(
+                    input,
+                    coords,
+                    match input.team {
+                        Team::Red => Team::Blue,
+                        Team::Blue => Team::Red,
+                    },
+                )
+                .map(|k| coords.direction(k.coords()))
+                .unwrap_or(Direction::East);
 
-                return Ok(Value::Move(Move::Attack(nearest_enemy)))
-            },
+                return Ok(Value::Move(Move::Attack(nearest_enemy)));
+            }
             ExpressionKind::MoveToNearestEnemy => {
-                let nearest_enemy = find_nearest_unit_of_team(input, coords, match input.team {
-                    Team::Red => Team::Blue,
-                    Team::Blue => Team::Red
-                }).map(|k|coords.direction(k.coords())).unwrap_or(Direction::East);
+                let nearest_enemy = find_nearest_unit_of_team(
+                    input,
+                    coords,
+                    match input.team {
+                        Team::Red => Team::Blue,
+                        Team::Blue => Team::Red,
+                    },
+                )
+                .map(|k| coords.direction(k.coords()))
+                .unwrap_or(Direction::East);
 
-                return Ok(Value::Move(Move::Move(nearest_enemy)))
+                return Ok(Value::Move(Move::Move(nearest_enemy)));
             }
             ExpressionKind::DistanceToNearestEnemy => {
-                let nearest_enemy = find_nearest_unit_of_team(input, coords, match input.team {
-                    Team::Red => Team::Blue,
-                    Team::Blue => Team::Red
-                }).map(|k|k.0.coords.distance(coords)).unwrap_or(99) as i32;
+                let nearest_enemy = find_nearest_unit_of_team(
+                    input,
+                    coords,
+                    match input.team {
+                        Team::Red => Team::Blue,
+                        Team::Blue => Team::Red,
+                    },
+                )
+                .map(|k| k.0.coords.distance(coords))
+                .unwrap_or(99) as i32;
 
-                return Ok(Value::Number(nearest_enemy))
-            },
-            ExpressionKind::DistanceToNearestAlly =>  {
-                let nearest_enemy = find_nearest_unit_of_team(input, coords, input.team).map(|k|k.0.coords.distance(coords)).unwrap_or(99) as i32;
+                return Ok(Value::Number(nearest_enemy));
+            }
+            ExpressionKind::DistanceToNearestAlly => {
+                let nearest_enemy = find_nearest_unit_of_team(input, coords, input.team)
+                    .map(|k| k.0.coords.distance(coords))
+                    .unwrap_or(99) as i32;
 
-                return Ok(Value::Number(nearest_enemy))
-            },
-            ExpressionKind::DistanceToCenter => Ok(Value::Number(coords.distance(Coords(9,9)) as i32)),
+                return Ok(Value::Number(nearest_enemy));
+            }
+            ExpressionKind::DistanceToCenter => {
+                Ok(Value::Number(coords.distance(Coords(9, 9)) as i32))
+            }
+        }
+    }
+
+    pub fn similarity(&self, other: &Self) -> f32 {
+        if self == other {
+            return 1.0;
+        }
+
+        match (self, other) {
+            (
+                ExpressionKind::If {
+                    condition: condition_a,
+                    then: then_a,
+                    otherwise: otherwise_a,
+                },
+                ExpressionKind::If {
+                    condition: condition_b,
+                    then: then_b,
+                    otherwise: otherwise_b,
+                },
+            ) => {
+                0.5 + condition_a.kind.similarity(&condition_b.kind) * 0.25
+                    + then_a.kind.similarity(&then_b.kind)
+                    + 0.25 * otherwise_a.kind.similarity(&otherwise_b.kind)
+            }
+            (ExpressionKind::ConstantNumber(a), ExpressionKind::ConstantNumber(b)) => {
+                if a.abs_diff(*b) <= 1 {
+                    0.75
+                } else {
+                    0.55
+                }
+            }
+            (
+                ExpressionKind::Equals {
+                    left: left_a,
+                    right: right_a,
+                },
+                ExpressionKind::Equals {
+                    left: left_b,
+                    right: right_b,
+                },
+            ) => {
+                0.5 + 0.25
+                    + left_a.kind.similarity(&left_b.kind)
+                    + 0.25
+                    + right_b.kind.similarity(&right_b.kind)
+            }
+            (
+                ExpressionKind::GreaterThan {
+                    left: left_a,
+                    right: right_a,
+                },
+                ExpressionKind::GreaterThan {
+                    left: left_b,
+                    right: right_b,
+                },
+            ) => {
+                0.5 + 0.25
+                    + left_a.kind.similarity(&left_b.kind)
+                    + 0.25
+                    + right_b.kind.similarity(&right_b.kind)
+            }
+            _ => 0.0,
         }
     }
 
@@ -347,8 +460,14 @@ impl ExpressionKind {
             ExpressionKind::Health => Some(1..11),
             ExpressionKind::X => Some(0..20),
             ExpressionKind::Y => Some(0..20),
-            ExpressionKind::ConstantNumber(m) => Some(*m..m+1),
-            _ => None
+            ExpressionKind::ConstantNumber(m) => Some(*m..m + 1),
+            ExpressionKind::DistanceToCenter
+            | ExpressionKind::DistanceToNearestAlly
+            | ExpressionKind::DistanceToNearestEnemy => Some(0..10),
+            ExpressionKind::AlliedSurroundingTiles | ExpressionKind::EnemySurroundingTiles => {
+                Some(0..5)
+            }
+            _ => None,
         }
     }
 
@@ -376,7 +495,13 @@ impl ExpressionKind {
             ExpressionKind::Equals { left, right } => {
                 if left == right {
                     ExpressionKind::ConstantBoolean(true)
-                } else if !left.kind.get_range().zip(right.kind.get_range()).map(|(a,b)| a.start < b.end && b.start < a.end).unwrap_or(false){
+                } else if !left
+                    .kind
+                    .get_range()
+                    .zip(right.kind.get_range())
+                    .map(|(a, b)| a.start < b.end && b.start < a.end)
+                    .unwrap_or(false)
+                {
                     ExpressionKind::ConstantBoolean(false)
                 } else {
                     ExpressionKind::Equals {
@@ -388,13 +513,23 @@ impl ExpressionKind {
             ExpressionKind::GreaterThan { left, right } => {
                 if left.kind == right.kind {
                     ExpressionKind::ConstantBoolean(true)
-                } else if left.kind.get_range().zip(right.kind.get_range()).map(|(a,b)| a.start >= b.end).unwrap_or(false){
+                } else if left
+                    .kind
+                    .get_range()
+                    .zip(right.kind.get_range())
+                    .map(|(a, b)| a.start >= b.end)
+                    .unwrap_or(false)
+                {
                     ExpressionKind::ConstantBoolean(true)
-                }
-                else if left.kind.get_range().zip(right.kind.get_range()).map(|(a,b)| b.start >= a.end).unwrap_or(false){
+                } else if left
+                    .kind
+                    .get_range()
+                    .zip(right.kind.get_range())
+                    .map(|(a, b)| b.start >= a.end)
+                    .unwrap_or(false)
+                {
                     ExpressionKind::ConstantBoolean(false)
-                } 
-                else {
+                } else {
                     match (&left.kind, &right.kind) {
                         (ExpressionKind::ConstantNumber(a), ExpressionKind::ConstantNumber(b)) => {
                             ExpressionKind::ConstantBoolean(a > b)
@@ -429,12 +564,26 @@ impl core::fmt::Display for ExpressionKind {
             ExpressionKind::Y => write!(f, "unit.coords.y"),
             ExpressionKind::GreaterThan { left, right } => write!(f, "({left}) >= ({right})"),
             ExpressionKind::Equals { left, right } => write!(f, "({left}) == ({right})"),
-            ExpressionKind::AlliedSurroundingTiles => write!(f, "friendly_surrounding_tiles(unit.coords, state)"),
-            ExpressionKind::EnemySurroundingTiles => write!(f, "unsafe_surrounding_tiles(unit.coords, state)"),
-            ExpressionKind::AttackNearestEnemy => write!(f, "Action.attack(unit.coords.direction_to(closest_enemy.coords))"),
-            ExpressionKind::MoveToNearestEnemy => write!(f, "Action.move(unit.coords.direction_to(closest_enemy.coords))"),
-            ExpressionKind::DistanceToNearestEnemy => write!(f, "closest_enemy.coords.distance_to(unit.coords)"),
-            ExpressionKind::DistanceToNearestAlly => write!(f, "closest_ally.coords.distance_to(unit.coords)"),
+            ExpressionKind::AlliedSurroundingTiles => {
+                write!(f, "friendly_surrounding_tiles(unit.coords, state)")
+            }
+            ExpressionKind::EnemySurroundingTiles => {
+                write!(f, "unsafe_surrounding_tiles(unit.coords, state)")
+            }
+            ExpressionKind::AttackNearestEnemy => write!(
+                f,
+                "Action.attack(unit.coords.direction_to(closest_enemy.coords))"
+            ),
+            ExpressionKind::MoveToNearestEnemy => write!(
+                f,
+                "Action.move(unit.coords.direction_to(closest_enemy.coords))"
+            ),
+            ExpressionKind::DistanceToNearestEnemy => {
+                write!(f, "closest_enemy.coords.distance_to(unit.coords)")
+            }
+            ExpressionKind::DistanceToNearestAlly => {
+                write!(f, "closest_ally.coords.distance_to(unit.coords)")
+            }
             ExpressionKind::DistanceToCenter => write!(f, "Coords(9,9).distance_to(unit.coords)"),
         }
     }
