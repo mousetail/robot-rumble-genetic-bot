@@ -4,12 +4,11 @@ use logic_ext::Direction;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::collections::{BTreeMap, HashMap};
-use std::io::BufRead;
-use std::io::{BufReader, Write};
-use std::path::Display;
-use std::process::{Command, ExitStatus};
+
+use std::io::Write;
+
+use std::fs::OpenOptions;
 use std::time::Instant;
-use std::{fs::OpenOptions, path::PathBuf};
 
 use expression::Expression;
 use serde::Serialize;
@@ -33,7 +32,7 @@ fn generate_bot<Rng: rand::Rng>(rng: &mut Rng) -> Bot {
     let mut expression = expression::Expression {
         kind: expression::ExpressionKind::ConstantMove(Move::Attack(Direction::South)),
     };
-    for i in 0..10 {
+    for _i in 0..10 {
         expression.mutate(rng);
     }
 
@@ -50,9 +49,13 @@ struct Species(u64);
 impl std::fmt::Display for Species {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name_index = self.0 % 4096;
-        let last_name_index = self.0 / 4096 % 4096;
+        let _last_name_index = self.0 / 4096 % 4096;
 
-        write!(f, "{} {}", FIRST_NAMES[name_index as usize], LAST_NAMES[name_index as usize])
+        write!(
+            f,
+            "{} {}",
+            FIRST_NAMES[name_index as usize], LAST_NAMES[name_index as usize]
+        )
     }
 }
 
@@ -84,8 +87,8 @@ fn cull_bots<RNG: rand::Rng>(
         species.entry(bot.species).or_insert(vec![]).push(bot);
     }
 
-    let mut top_species:Vec<_> = species_scores.iter().collect();
-    top_species.sort_by_key(|d|d.1);
+    let mut top_species: Vec<_> = species_scores.iter().collect();
+    top_species.sort_by_key(|d| d.1);
     top_species.reverse();
     print!("\t Top species:");
     for (specie, score) in top_species.iter().take(5) {
@@ -118,7 +121,10 @@ fn cull_bots<RNG: rand::Rng>(
         }
         let length = candidates.len();
         if let Some(candiate) = candidates.get_mut(rng.gen_range(0..length)) {
-            candiate.swap_remove(rng.gen_range(1..candiate.len()).max(rng.gen_range(1..candiate.len())));
+            candiate.swap_remove(
+                rng.gen_range(1..candiate.len())
+                    .max(rng.gen_range(1..candiate.len())),
+            );
         }
     }
 
@@ -192,25 +198,31 @@ fn run_batch<'a>(bots: &'a mut [Bot], iterations: usize) -> BoxFuture<'a, ()> {
                     }
                 }
 
-                let (total_red_health, total_blue_health, total_red_units, total_blue_units) = result
-                    .turns[result.turns.len() - 1]
-                    .state
-                    .objs
-                    .values()
-                    .fold(
-                        (0, 0, 0, 0),
-                        |(red_health, blue_health, red_units, blue_units), b| match b.1 {
-                            ObjDetails::Unit(Unit { team, health, .. }) => match team {
-                                Team::Red => {
-                                    (red_health + health, blue_health, red_units + 1, blue_units)
-                                }
-                                Team::Blue => {
-                                    (red_health, blue_health + health, red_units, blue_units + 1)
-                                }
+                let (total_red_health, total_blue_health, total_red_units, total_blue_units) =
+                    result.turns[result.turns.len() - 1]
+                        .state
+                        .objs
+                        .values()
+                        .fold(
+                            (0, 0, 0, 0),
+                            |(red_health, blue_health, red_units, blue_units), b| match b.1 {
+                                ObjDetails::Unit(Unit { team, health, .. }) => match team {
+                                    Team::Red => (
+                                        red_health + health,
+                                        blue_health,
+                                        red_units + 1,
+                                        blue_units,
+                                    ),
+                                    Team::Blue => (
+                                        red_health,
+                                        blue_health + health,
+                                        red_units,
+                                        blue_units + 1,
+                                    ),
+                                },
+                                _ => (red_health, blue_health, red_units, blue_units),
                             },
-                            _ => (red_health, blue_health, red_units, blue_units),
-                        },
-                    );
+                        );
 
                 bots[bot_blue_index].wins.1 += total_blue_units;
                 bots[bot_red_index].wins.1 += total_red_units;
@@ -294,13 +306,21 @@ async fn main() {
         }
 
         while bots.len() < NUM_ROBOTS {
-            let mut bot_copy = bots[rng.gen_range(0..culled_length).min(rng.gen_range(0..culled_length))].clone();
+            let mut bot_copy = bots[rng
+                .gen_range(0..culled_length)
+                .min(rng.gen_range(0..culled_length))]
+            .clone();
             bot_copy.logic.mutate(&mut rng);
             bot_copy.logic = bot_copy.logic.simplify().simplify().simplify();
             bots.push(bot_copy);
         }
 
-        let mut file = OpenOptions::new().write(true).truncate(true).create(true).open(format!("bots_tmp/{i}.py")).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(format!("bots_tmp/{i}.py"))
+            .unwrap();
         write!(file, "{}", bots[0].logic).unwrap();
     }
 

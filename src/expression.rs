@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Display, result};
+use std::collections::BTreeMap;
 
 use logic::{ActionType, Coords, Id, ObjDetails, RobotRunner, Team, Unit};
 use rand::seq::SliceRandom;
@@ -134,7 +134,10 @@ impl ExpressionKind {
         }
     }
 
-    fn generate_integer_expression<RAND: rand::Rng>(rng: &mut RAND, range: Option<std::ops::Range<i32>>) -> ExpressionKind {
+    fn generate_integer_expression<RAND: rand::Rng>(
+        rng: &mut RAND,
+        range: Option<std::ops::Range<i32>>,
+    ) -> ExpressionKind {
         if rng.gen_bool(0.5) {
             return [
                 ExpressionKind::DistanceToCenter,
@@ -149,9 +152,9 @@ impl ExpressionKind {
             ExpressionKind::X,
             ExpressionKind::Y,
             ExpressionKind::ConstantNumber(
-                range.map(|d|rng.gen_range(d)).unwrap_or_else(||
-                    *[0, 1, -1, 5, -5, 10, 17].choose(rng).unwrap()
-                )
+                range
+                    .map(|d| rng.gen_range(d))
+                    .unwrap_or_else(|| *[0, 1, -1, 5, -5, 10, 17].choose(rng).unwrap()),
             ),
         ]
         .choose(rng)
@@ -424,7 +427,7 @@ impl ExpressionKind {
             (
                 ExpressionKind::Equals {
                     left: left_a,
-                    right: right_a,
+                    right: _right_a,
                 },
                 ExpressionKind::Equals {
                     left: left_b,
@@ -439,7 +442,7 @@ impl ExpressionKind {
             (
                 ExpressionKind::GreaterThan {
                     left: left_a,
-                    right: right_a,
+                    right: _right_a,
                 },
                 ExpressionKind::GreaterThan {
                     left: left_b,
@@ -648,7 +651,7 @@ impl RobotRunner for Expression {
                     }),
                     _ => panic!("Expected expression to return an action"),
                 })
-                .map_err(|k| logic::Error {
+                .map_err(|_k| logic::Error {
                     summary: format!(""),
                     details: None,
                     loc: None,
