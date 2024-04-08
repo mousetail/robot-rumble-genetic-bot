@@ -1,3 +1,4 @@
+use family_tree::{FamilyTree, Species};
 use futures::future::{BoxFuture, FutureExt};
 use logic::{MainOutput, ObjDetails, RobotRunner, Team, Unit};
 use logic_ext::Direction;
@@ -9,19 +10,21 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
 use std::fs::OpenOptions;
+use std::path::Path;
 use std::time::Instant;
 
 use expression::Expression;
-use serde::{Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::expression::Move;
 
 mod expression;
 mod logic_ext;
 mod sockets;
+mod family_tree;
 
-const FIRST_NAMES: [&'static str; 4096] = include!("../first-names.json");
-const LAST_NAMES: [&'static str; 4096] = include!("../last-names.json");
+
+const SAVE_FILENAME: &'static str = "bots.cbor";
 
 const NUM_ROBOTS: usize = 200;
 const SURVIVING_ROBOTS: usize = 50;
@@ -32,10 +35,7 @@ const NUMER_OF_GAMES_PER_BOT_PER_ROUND: usize = 2;
 const NUMER_OF_PLAYOFF_ROUNDS: usize = 3;
 
 fn generate_bot<Rng: rand::Rng>(rng: &mut Rng) -> Bot {
-    let mut expression = expression::Expression {
-        kind: expression::ExpressionKind::ConstantMove(Move::Attack(Direction::South)),
-        times_used: 0,
-    };
+    let mut expression = expression::Expression::new(expression::ExpressionKind::ConstantMove(Move::Attack(Direction::South)));
     for _i in 0..10 {
         expression.mutate(rng, true);
     }
@@ -49,32 +49,7 @@ fn generate_bot<Rng: rand::Rng>(rng: &mut Rng) -> Bot {
     };
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-struct Species(u64);
-
-impl std::fmt::Display for Species {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name_index = self.0 % 4096;
-        let _last_name_index = self.0 / 4096 % 4096;
-
-        write!(
-            f,
-            "{} {}",
-            FIRST_NAMES[name_index as usize], LAST_NAMES[name_index as usize]
-        )
-    }
-}
-
-impl Serialize for Species {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&format!("{}", self))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Default, Ord, PartialEq, PartialOrd, Eq, Copy)]
+#[derive(Debug, Clone, Serialize, Default, Ord, PartialEq, PartialOrd, Eq, Copy, Deserialize)]
 struct BotScore {
     wins: [usize; NUMER_OF_PLAYOFF_ROUNDS],
     friendly_units: isize,
@@ -84,13 +59,13 @@ struct BotScore {
     total_wins: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Bot {
     logic: Expression,
     species: Species,
     score: BotScore,
     generation: usize,
-    parents: Option<(Species, Species)>,
+    parents: Option<[Species; 2]>,
 }
 
 #[async_trait::async_trait]
@@ -105,7 +80,7 @@ fn cull_bots<RNG: rand::Rng>(
     target_species: usize,
     target_bots: usize,
     rng: &mut RNG,
-) -> (Vec<Bot>, Vec<(Species, BotScore)>) {
+) -> Vec<Bot> {
     let mut species = HashMap::new();
     let mut species_scores = HashMap::new();
 
@@ -120,15 +95,6 @@ fn cull_bots<RNG: rand::Rng>(
         *k = (*k).max(bot.score);
         species.entry(bot.species).or_insert(vec![]).push(bot);
     }
-
-    let mut top_species: Vec<_> = species_scores.iter().map(|(&a, &b)| (a, b)).collect();
-    top_species.sort_by_key(|d| d.1);
-    top_species.reverse();
-    print!("\t Top species:");
-    for (specie, score) in top_species.iter().take(5) {
-        print!("{specie} ({score:?}), ")
-    }
-    println!("");
 
     while species.len() > target_species {
         if let Some(&specie_to_remove) = species.keys().min_by_key(|t| species_scores.get(t)) {
@@ -162,13 +128,10 @@ fn cull_bots<RNG: rand::Rng>(
         }
     }
 
-    return (
-        species
+    return species
             .into_iter()
             .flat_map(|(_keys, value)| value)
-            .collect(),
-        top_species,
-    );
+            .collect();
 }
 
 fn crossover<RNG: rand::Rng>(bots: &[Bot], rng: &mut RNG) -> Bot {
@@ -185,14 +148,17 @@ fn crossover<RNG: rand::Rng>(bots: &[Bot], rng: &mut RNG) -> Bot {
         species: Species(rng.next_u64()),
         score: Default::default(),
         generation: 0,
-        parents: Some((first_species, bots[next_bot_index].species)),
+        parents: Some([first_species, bots[next_bot_index].species]),
     };
 }
 
-#[allow(unused)]
-fn draw_game(game: &MainOutput) {
+fn draw_game(game: &MainOutput) -> Vec<String> {
+    let mut result = Vec::with_capacity(100);
+
     for turn in game.turns.iter() {
         let state = &turn.state;
+
+        let mut output = String::with_capacity(18 * 19);
 
         let mut out = [[' '; 19]; 19];
         for (_id, obj) in state.objs.iter() {
@@ -209,15 +175,15 @@ fn draw_game(game: &MainOutput) {
 
         for line in out {
             for chr in line {
-                print!("{chr}");
+                output.push(chr);
             }
-            println!();
+            output.push('\n');
         }
 
-        println!("{:?}", turn.robot_actions);
-
-        println!();
+        result.push(output)
     }
+
+    result
 }
 
 async fn run_game(bots: &mut [Bot], blue_index: usize, red_index: usize) -> MainOutput {
@@ -352,43 +318,38 @@ async fn main() {
     // println!("{:?}", std::fs::read_dir(".").unwrap().collect::<Vec<_>>());
     let mut rng = rand::thread_rng();
 
-    let mut bots = (0..NUM_ROBOTS - 1)
-        .map(|_| generate_bot(&mut rng))
-        .collect::<Vec<_>>();
+    let mut family_tree = FamilyTree::new();
 
-    bots.push(Bot {
-        species: Species(0),
-        logic: Expression {
-            times_used: 0,
-            kind: expression::ExpressionKind::If {
-                condition: Box::new(Expression {
-                    times_used: 0,
-                    kind: expression::ExpressionKind::GreaterThan {
-                        left: Box::new(Expression {
-                            times_used: 0,
-                            kind: expression::ExpressionKind::X,
-                        }),
-                        right: Box::new(Expression {
-                            times_used: 0,
-                            kind: expression::ExpressionKind::ConstantNumber(9),
-                        }),
-                    },
-                }),
-                then: Box::new(Expression {
-                    kind: expression::ExpressionKind::ConstantMove(Move::Move(Direction::West)),
-                    times_used: 0,
-                }),
-                otherwise: Box::new(Expression {
-                    kind: expression::ExpressionKind::ConstantMove(Move::Move(Direction::East)),
-                    times_used: 0,
-                }),
-            },
-        },
-        score: Default::default(),
-        generation: 0,
-        parents: None,
-    });
-    println!("{}", Species(0));
+    let mut bots = if Path::new(SAVE_FILENAME).exists() {
+        let file = OpenOptions::new().read(true).open(SAVE_FILENAME).unwrap();
+        ciborium::from_reader(file).unwrap()
+    } else {
+        let mut bots = (0..NUM_ROBOTS - 1)
+            .map(|_| generate_bot(&mut rng))
+            .collect::<Vec<_>>();
+
+        bots.push(Bot {
+            species: Species(0),
+            logic: Expression::new(expression::ExpressionKind::If {
+                    condition: Expression::new_box(
+                        expression::ExpressionKind::GreaterThan {
+                            left: Expression::new_box(
+                                expression::ExpressionKind::X,
+                            ),
+                            right: Expression::new_box(expression::ExpressionKind::ConstantNumber(9),
+                            ),
+                        },
+                    ),
+                    then: Expression::new_box(expression::ExpressionKind::ConstantMove(Move::Move(Direction::West))),
+                    otherwise: Expression::new_box(expression::ExpressionKind::ConstantMove(Move::Move(Direction::East))),
+                }
+            ),
+            score: Default::default(),
+            generation: 0,
+            parents: None,
+        });
+        bots
+    };
 
     let (channel, _) = tokio::sync::broadcast::channel::<TrainingProgressAnnouncement>(16);
     tokio::spawn(start_socket(channel.clone()));
@@ -410,7 +371,7 @@ async fn main() {
             bots[bots.len() - 1].species,
             bots[bots.len() - 1].generation
         );
-        if let Some((parent1, parent2)) = bots[bots.len() - 1].parents {
+        if let Some([parent1, parent2]) = bots[bots.len() - 1].parents {
             println!("\tParents:\t{parent1}\t{parent2}")
         }
         println!("\tLogic:\t {}", bots[bots.len() - 1].logic);
@@ -459,23 +420,27 @@ async fn main() {
             global_end_time - global_start_time
         );
 
+        family_tree.analize(&bots, i);
+
         let best_bot = bots[0].clone();
 
         let culled_length = SURVIVING_ROBOTS;
-        let species_scores;
         if i % CROSSOVER_INTERVAL == CROSSOVER_INTERVAL - 1 {
-            (bots, species_scores) = cull_bots(bots, NUM_SPECIES - 1, culled_length, &mut rng);
+            bots = cull_bots(bots, NUM_SPECIES - 1, culled_length, &mut rng);
             bots.push(crossover(&bots, &mut rng));
         } else {
-            (bots, species_scores) = cull_bots(bots, NUM_SPECIES, culled_length, &mut rng);
+            bots = cull_bots(bots, NUM_SPECIES, culled_length, &mut rng);
         }
 
         if channel.receiver_count() > 0 {
+            let last_game_status = run_game(bots.as_mut_slice(), 0, 1).await;
+
             channel
                 .send(TrainingProgressAnnouncement {
                     best_bot,
-                    species: species_scores,
+                    species: family_tree.clone(),
                     iteration_number: i,
+                    last_game: draw_game(&last_game_status)
                 })
                 .unwrap();
         }
@@ -494,6 +459,13 @@ async fn main() {
         for bot in bots.iter_mut() {
             bot.logic.clear_times_used();
         }
+
+        if let Ok(save) = OpenOptions::new().write(true).truncate(true).create(true).open(SAVE_FILENAME) {
+            ciborium::into_writer(&bots, save).unwrap();
+        } else {
+            eprintln!("failed to save file");
+        }
+
     }
 
     // println!("{:?}", std::fs::read_dir("..").unwrap().collect::<Vec<_>>());

@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::logic_ext::CoordsExt;
 use crate::logic_ext::Direction;
+use crate::logic_ext::TeamExt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Expression {
@@ -22,6 +23,17 @@ impl std::fmt::Display for Expression {
 }
 
 impl Expression {
+    pub fn new(kind: ExpressionKind) -> Expression {
+        return Expression {
+            kind,
+            times_used: 0
+        }
+    }
+
+    pub fn new_box(kind: ExpressionKind) -> Box<Expression> {
+        return Box::new(Self::new(kind));
+    }
+
     pub fn mutate<RAND: rand::Rng>(&mut self, rng: &mut RAND, ignore_sanity_checks: bool) {
         self.kind.mutate(rng, self.times_used, ignore_sanity_checks)
     }
@@ -32,24 +44,15 @@ impl Expression {
     }
 
     pub fn simplify(self) -> Expression {
-        Expression {
-            kind: self.kind.simplify(),
-            times_used: 0,
-        }
+        Expression::new(self.kind.simplify())
     }
 
     pub fn crossover<RNG: rand::Rng>(self, other: Self, rng: &mut RNG) -> Expression {
-        return Expression {
-            kind: ExpressionKind::If {
-                condition: Box::new(Expression {
-                    kind: ExpressionKind::generate_boolean_expression(rng),
-                    times_used: 0,
-                }),
+        return Expression::new(ExpressionKind::If {
+                condition: Expression::new_box(ExpressionKind::generate_boolean_expression(rng)),
                 then: Box::new(self),
                 otherwise: Box::new(other),
-            },
-            times_used: 0,
-        };
+            });
     }
 
     pub fn clear_times_used(&mut self) {
@@ -86,6 +89,8 @@ pub enum ExpressionKind {
         left: Box<Expression>,
         right: Box<Expression>,
     },
+    ClosestEnemyHealth,
+    ClosestAllyHealth,
 }
 #[derive(Debug)]
 pub enum ValueType {
@@ -119,6 +124,8 @@ impl ExpressionKind {
             ExpressionKind::DistanceToNearestEnemy => ValueType::Number,
             ExpressionKind::DistanceToNearestAlly => ValueType::Number,
             ExpressionKind::DistanceToCenter => ValueType::Number,
+            ExpressionKind::ClosestAllyHealth => ValueType::Number,
+            ExpressionKind::ClosestEnemyHealth => ValueType::Number
         }
     }
 
@@ -171,14 +178,11 @@ impl ExpressionKind {
     }
 
     fn generate_boolean_expression<RAND: rand::Rng>(rng: &mut RAND) -> ExpressionKind {
-        let left = Box::new(Expression {
-            kind: Self::generate_integer_expression(rng, None),
-            times_used: 0,
-        });
-        let right = Box::new(Expression {
-            kind: Self::generate_integer_expression(rng, left.kind.get_range()),
-            times_used: 0,
-        });
+        let left = Expression::new_box(Self::generate_integer_expression(rng, None)
+        );
+        let right = Expression::new_box(
+            Self::generate_integer_expression(rng, left.kind.get_range()),
+        );
 
         if rng.gen_bool(0.1) {
             return ExpressionKind::Equals { left, right };
@@ -203,18 +207,9 @@ impl ExpressionKind {
             let condition = Self::generate_boolean_expression(rng);
 
             *self = ExpressionKind::If {
-                then: Box::new(Expression {
-                    kind: self.clone(),
-                    times_used: 0,
-                }),
-                otherwise: Box::new(Expression {
-                    kind: right,
-                    times_used: 0,
-                }),
-                condition: Box::new(Expression {
-                    kind: condition,
-                    times_used: 0,
-                }),
+                then: Expression::new_box(self.clone()),
+                otherwise: Expression::new_box(right),
+                condition: Expression::new_box(condition),
             };
             return;
         }
@@ -248,7 +243,7 @@ impl ExpressionKind {
             }
             ExpressionKind::ConstantBoolean(b) => *b = !*b,
             ExpressionKind::ConstantMove(_) => *self = Self::generate_move_expression(rng),
-            ExpressionKind::Health => (),
+            ExpressionKind::Health => *self = [ExpressionKind::ClosestEnemyHealth, ExpressionKind::ClosestAllyHealth].choose(rng).unwrap().clone(),
             ExpressionKind::X => *self = ExpressionKind::Y,
             ExpressionKind::Y => *self = ExpressionKind::X,
             ExpressionKind::GreaterThan { left, right } => {
@@ -288,6 +283,8 @@ impl ExpressionKind {
                     *self = ExpressionKind::DistanceToNearestAlly
                 }
             }
+            ExpressionKind::ClosestEnemyHealth => *self = [ExpressionKind::Health, ExpressionKind::ClosestAllyHealth].choose(rng).unwrap().clone(),
+            ExpressionKind::ClosestAllyHealth => *self = [ExpressionKind::Health, ExpressionKind::ClosestEnemyHealth].choose(rng).unwrap().clone(),
         }
     }
 
@@ -429,6 +426,26 @@ impl ExpressionKind {
             ExpressionKind::DistanceToCenter => {
                 Ok(Value::Number(coords.distance(Coords(9, 9)) as i32))
             }
+            ExpressionKind::ClosestEnemyHealth => {
+                let closest_enemy_health = find_nearest_unit_of_team(input, coords, input.team.opposite())
+                    .and_then(|k| match k.1 {
+                        ObjDetails::Unit(Unit { health, ..}) => Some(health),
+                        _ => None
+                    })
+                    .unwrap_or(0) as i32;
+
+                return Ok(Value::Number(closest_enemy_health));
+            },
+            ExpressionKind::ClosestAllyHealth => {
+                let closest_ally_health = find_nearest_unit_of_team(input, coords, input.team)
+                    .and_then(|k| match k.1 {
+                        ObjDetails::Unit(Unit { health, ..}) => Some(health),
+                        _ => None
+                    })
+                    .unwrap_or(0) as i32;
+
+                return Ok(Value::Number(closest_ally_health));
+            },
         }
     }
 
@@ -648,6 +665,8 @@ impl core::fmt::Display for ExpressionKind {
                 write!(f, "closest_ally.coords.distance_to(unit.coords)")
             }
             ExpressionKind::DistanceToCenter => write!(f, "Coords(9,9).distance_to(unit.coords)"),
+            ExpressionKind::ClosestEnemyHealth => write!(f, "closest_enemy.health"),
+            ExpressionKind::ClosestAllyHealth => write!(f, "closest_ally.health"),
         }
     }
 }

@@ -8,6 +8,31 @@
 
             *, *:before, *:after {
                 box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            .replay-row {
+                display: flex;
+            }
+
+            .replay-cell {
+                display: inline-block;
+                width: 1.5rem;
+                height: 1.5rem;
+                border: 1px solid black;
+
+                &.grey {
+                    background-color: #888;
+                }
+
+                &.red {
+                    background-color: red;
+                }
+
+                &.blue {
+                    background-color: blue;
+                }
             }
         </style>
     </head>
@@ -36,6 +61,14 @@
                 <td><code id="best-bot-enemy-units"></code> Enemy Units</td>
                 <td><code id="best-bot-friendly-health"></code> Friendly Health</td>
                 <td><code id="best-bot-enemy-health"></code> Enemy Health</td>
+            </tr>
+            <tr>
+                <td>Replay</td>
+                <td colspan="5">
+                    <div id="replay">
+
+                    </div>
+                </td>
             </tr>
             <tr>
                 <td>Best Bot Logic:</td>
@@ -73,7 +106,11 @@
             let best_bot_enemy_health_box = document.getElementById('best-bot-enemy-health');
 
             const species_box = document.getElementById('species');
+            const replay_box = document.getElementById('replay');
 
+            let replay_interval = null;
+            let replay_turn = 0;
+            let replay_turns = [];
 
             let canvas = document.getElementById('graph-canvas');
 
@@ -178,7 +215,56 @@
                     generation = next_generation;
                     parents = next_parents;
                 }
+            }
 
+            function initReplay() {
+                replay_box.replaceChildren();
+
+                for(let y = 0; y<19; y++){
+                    const row = document.createElement('div');
+                    row.classList.add('replay-row');
+                    for (let x=0; x<19; x++) {
+                        const cell = document.createElement('span');
+                        cell.classList.add('replay-cell');
+                        row.appendChild(cell);
+                    }
+                    replay_box.appendChild(row);
+                }
+
+                if (replay_interval) {
+                    window.clearInterval(replay_interval);
+                }
+
+                replay_interval = window.setInterval(
+                    replayUpdate,
+                    500
+                );
+                replay_turn = 0;
+                replayUpdate();
+            }
+
+            function replayUpdate() {
+                let turn = replay_turns[replay_turn];
+
+                for(let y = 0; y<19; y++){
+                    const row = replay_box.children[y];
+                    for (let x = 0; x<19; x++) {
+                        const cell = row.children[x];
+
+                        const text= turn[y * 20 + x];
+                        cell.textContent = text;
+
+                        cell.classList.remove('red', 'grey', 'blue')
+                        cell.classList.add(
+                            text == '#' ? 'grey' :
+                            text == '.' ? 'blue' :
+                            text == '^' ? 'red' :
+                            'white'
+                        )
+                    }
+                }
+
+                replay_turn = (replay_turn + 1)%replay_turns.length;
             }
 
             ws.addEventListener('message', (ev)=>{
@@ -197,11 +283,15 @@
                 best_bot_health_box.textContent = friendly_health;
                 best_bot_enemy_health_box.textContent = enemy_health;
 
-                species_box.replaceChildren(...data.species.map(([name, score])=>{
-                    let div = document.createElement('div');
-                    div.textContent = name + ' (' + Object.entries(score).map(([a,b])=>a+': '+b).join(', ')+')';
-                    return div;
-                }))
+                replay_turns = data.last_game;
+
+                // species_box.replaceChildren(...data.species.map(([name, score])=>{
+                //     let div = document.createElement('div');
+                //     div.textContent = name + ' (' + Object.entries(score).map(([a,b])=>a+': '+b).join(', ')+')';
+                //     return div;
+                // }));
+
+                initReplay();
             })
         </script>
     </body>

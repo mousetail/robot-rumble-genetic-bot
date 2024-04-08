@@ -5,14 +5,16 @@ use futures::StreamExt;
 use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::family_tree::FamilyTree;
 use crate::BotScore;
 use crate::{Bot, Species};
 
 #[derive(Clone, Serialize, Debug)]
 pub struct TrainingProgressAnnouncement {
     pub best_bot: Bot,
-    pub species: Vec<(Species, BotScore)>,
+    pub species: FamilyTree,
     pub iteration_number: usize,
+    pub last_game: Vec<String>
 }
 
 pub async fn start_socket(

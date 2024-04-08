@@ -1,3 +1,4 @@
+use logic::Team;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +42,19 @@ impl CoordsExt for logic::Coords {
             return Direction::North;
         } else {
             return Direction::East;
+        }
+    }
+}
+
+pub trait TeamExt {
+    fn opposite(self) -> Self;
+}
+
+impl TeamExt for logic::Team {
+    fn opposite(self) -> Self {
+        match self {
+            Team::Red => Team::Blue,
+            Team::Blue => Team::Red
         }
     }
 }
